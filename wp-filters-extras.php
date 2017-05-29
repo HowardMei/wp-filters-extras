@@ -1,86 +1,133 @@
 <?php
-/*
-Plugin Name: WP Filters Extras
-Plugin URI: http://www.beapi.fr
-Description: Add 2 methods for WP Filter API
-Version: 1.0.1
-Author: BeAPI
-Author URI: http://www.beapi.fr
+// Original Author: https://gist.github.com/tripflex/c6518efc1753cf2392559866b4bd1a53
 
-Copyright 2012 Amaury Balmer - amaury@beapi.fr
+if ( ! function_exists('remove_filters_bymethod_name') ) {
+    /**
+     * Remove Class Filter Without Access to Class Object
+     *
+     * In order to use the core WordPress remove_filter() on a filter added with the callback
+     * to a class, you either have to have access to that class object, or it has to be a call
+     * to a static method.  This method allows you to remove filters with a callback to a class
+     * you don't have access to.
+     *
+     * Works with WordPress 4.7+ using internal WordPress removal
+     *
+     * @param string $filter_tag   Filter to remove
+     * @param string $class_name  Optional class name for the filter's callback
+     * @param string $method_name Method name for the filter's callback
+     * @param int    $priority    Priority of the filter (default 10)
+     *
+     * @return bool Whether the function is removed.
+     */
+    function remove_filters_bymethod_name( $filter_tag, $class_name = '', $method_name = '', $priority = 10 ) {
+        global $wp_filter;
 
-This program is free software; you can redistribute it and/or modify
-it under the terms of the GNU General Public License, version 2, as
-published by the Free Software Foundation.
+        // Check that filter actually exists first
+        if ( ! isset($wp_filter[$filter_tag]) ) return FALSE;
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
+        /**
+         * If filter config is an object, means we're using WordPress 4.7+ and the config is no longer
+         * a simple array, rather it is an object that implements the ArrayAccess interface.
+         *
+         * To be backwards compatible, we set $callbacks equal to the correct array as a reference (so $wp_filter is updated)
+         *
+         * @see https://make.wordpress.org/core/2016/09/08/wp_hook-next-generation-actions-and-filters/
+         */
+        if ( is_object($wp_filter[$filter_tag]) && isset($wp_filter[$filter_tag]->callbacks) ) {
+            // Create $filter_object object from filter tag, to use below
+            $filter_object = $wp_filter[$filter_tag];
+            $callbacks = &$wp_filter[$filter_tag]->callbacks;
+        } else {
+            $callbacks = &$wp_filter[$filter_tag];
+        }
 
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+        // Exit if there aren't any callbacks for specified priority
+        if ( ! isset( $callbacks[ $priority ] ) || empty( $callbacks[ $priority ] ) ) return FALSE;
 
-/**
- * Allow to remove method for an hook when, it's a class method used and class don't have global for instanciation !
- */
-function remove_filters_with_method_name( $hook_name = '', $method_name = '', $priority = 0 ) {
-	global $wp_filter;
+        // Loop through each filter for the specified priority, looking for our class & method
+        foreach( (array) $callbacks[ $priority ] as $filter_id => $filter_array ) {
 
-	// Take only filters on right hook name and priority
-	if ( !isset($wp_filter[$hook_name][$priority]) || !is_array($wp_filter[$hook_name][$priority]) )
-		return false;
+            // Filter should always be an array - array( $this, 'method' ), if not goto next
+            if ( ! isset( $filter_array[ 'function' ] ) || ! is_array( $filter_array[ 'function' ] ) ) continue;
 
-	// Loop on filters registered
-	foreach( (array) $wp_filter[$hook_name][$priority] as $unique_id => $filter_array ) {
-		// Test if filter is an array ! (always for class/method)
-		if ( isset($filter_array['function']) && is_array($filter_array['function']) ) {
-			// Test if object is a class and method is equal to param !
-			if ( is_object($filter_array['function'][0]) && get_class($filter_array['function'][0]) && $filter_array['function'][1] == $method_name ) {
-			    // Test for WordPress >= 4.7 WP_Hook class (https://make.wordpress.org/core/2016/09/08/wp_hook-next-generation-actions-and-filters/)
-			    if( is_a( $wp_filter[$hook_name], 'WP_Hook' ) ) {
-			        unset( $wp_filter[$hook_name]->callbacks[$priority][$unique_id] );
-			    }
-			    else {
-				    unset($wp_filter[$hook_name][$priority][$unique_id]);
-			    }
-			}
-		}
+            // If first value in array is not an object, it can't be a class
+            if ( ! is_object( $filter_array[ 'function' ][ 0 ] ) ) continue;
 
-	}
+            // Method doesn't match the one we're looking for, goto next
+            if ( $filter_array[ 'function' ][ 1 ] !== $method_name ) continue;
 
-	return false;
+            // Method matched, now let's check the Class
+            if ( get_class( $filter_array[ 'function' ][ 0 ] ) === $class_name ) {
+
+                // WordPress 4.7+ use core remove_filter() since we found the class object
+                if( isset( $filter_object ) ){
+                    // Handles removing filter, reseting callback priority keys mid-iteration, etc.
+                    $filter_object->remove_filter($filter_tag, $filter_array['function'], $priority );
+
+                } else {
+                    // Use legacy removal process (pre 4.7)
+                    unset( $callbacks[ $priority ][ $filter_id ] );
+                    // and if it was the only filter in that priority, unset that priority
+                    if ( empty( $callbacks[ $priority ] ) ) {
+                        unset( $callbacks[ $priority ] );
+                    }
+                    // and if the only filter for that tag, set the tag to an empty array
+                    if ( empty( $callbacks ) ) {
+                        $callbacks = array();
+                    }
+                    // Remove this filter from merged_filters, which specifies if filters have been sorted
+                    unset( $GLOBALS['merged_filters'][$filter_tag] );
+                }
+
+                return TRUE;
+            } elseif ( empty( $class_name ) && get_class($filter_array['function'][0]) ) {
+                if( isset( $filter_object ) ){
+                    // Handles removing filter, reseting callback priority keys mid-iteration, etc.
+                    $filter_object->remove_filter($filter_tag, $filter_array['function'], $priority );
+
+                } else {
+                    // Use legacy removal process (pre 4.7)
+                    unset( $callbacks[ $priority ][ $filter_id ] );
+                    // and if it was the only filter in that priority, unset that priority
+                    if ( empty( $callbacks[ $priority ] ) ) {
+                        unset( $callbacks[ $priority ] );
+                    }
+                    // and if the only filter for that tag, set the tag to an empty array
+                    if ( empty( $callbacks ) ) {
+                        $callbacks = array();
+                    }
+                    // Remove this filter from merged_filters, which specifies if filters have been sorted
+                    unset( $GLOBALS['merged_filters'][$filter_tag] );
+                }
+
+                return TRUE;
+            }
+        }
+
+        return FALSE;
+    }
 }
 
-/**
- * Allow to remove method for an hook when, it's a class method used and class don't have variable, but you know the class name :)
- */
-function remove_filters_for_anonymous_class( $hook_name = '', $class_name ='', $method_name = '', $priority = 0 ) {
-	global $wp_filter;
-
-	// Take only filters on right hook name and priority
-	if ( !isset($wp_filter[$hook_name][$priority]) || !is_array($wp_filter[$hook_name][$priority]) )
-		return false;
-
-	// Loop on filters registered
-	foreach( (array) $wp_filter[$hook_name][$priority] as $unique_id => $filter_array ) {
-		// Test if filter is an array ! (always for class/method)
-		if ( isset($filter_array['function']) && is_array($filter_array['function']) ) {
-			// Test if object is a class, class and method is equal to param !
-			if ( is_object($filter_array['function'][0]) && get_class($filter_array['function'][0]) && get_class($filter_array['function'][0]) == $class_name && $filter_array['function'][1] == $method_name ) {
-			    // Test for WordPress >= 4.7 WP_Hook class (https://make.wordpress.org/core/2016/09/08/wp_hook-next-generation-actions-and-filters/)
-			    if( is_a( $wp_filter[$hook_name], 'WP_Hook' ) ) {
-			        unset( $wp_filter[$hook_name]->callbacks[$priority][$unique_id] );
-			    }
-			    else {
-				    unset($wp_filter[$hook_name][$priority][$unique_id]);
-			    }
-			}
-		}
-
-	}
-
-	return false;
+if ( ! function_exists('remove_actions_bymethod_name') ) {
+    /**
+     * Remove Class Action Without Access to Class Object
+     *
+     * In order to use the core WordPress remove_action() on an action added with the callback
+     * to a class, you either have to have access to that class object, or it has to be a call
+     * to a static method.  This method allows you to remove actions with a callback to a class
+     * you don't have access to.
+     *
+     * Works with WordPress 4.7+ versions
+     *
+     * @param string $action_hook   Action to remove
+     * @param string $class_name  Optional class name for the action's callback
+     * @param string $method_name Method name for the action's callback
+     * @param int    $priority    Priority of the action (default 10)
+     *
+     * @return bool               Whether the function is removed.
+     */
+    function remove_actions_bymethod_name( $action_hook, $class_name = '', $method_name = '', $priority = 10 ) {
+        return remove_filters_bymethod_name( $action_hook, $class_name, $method_name, $priority );
+    }
 }
+
